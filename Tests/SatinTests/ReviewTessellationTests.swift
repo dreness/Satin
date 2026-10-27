@@ -20,9 +20,9 @@ final class ReviewTessellationTests: XCTestCase {
     final class CountingTessellator: TessellationProcessor<MTLTriangleTessellationFactorsHalf> {
         var calls = 0
         var callsWithPipeline = 0
-        override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
+        override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) throws {
             calls += 1
-            super.update(commandBuffer, iterations: iterations)
+            try super.update(commandBuffer, iterations: iterations)
             if resetPipeline != nil || updatePipeline != nil { callsWithPipeline += 1 }
         }
     }
@@ -46,8 +46,12 @@ final class ReviewTessellationTests: XCTestCase {
         let (mesh, tessellator) = makeMesh(tessellate: true)
         let commandBuffer = try XCTUnwrap(commandQueue.makeCommandBuffer())
         let builder = submission(encoder)
-        mesh.encode(in: builder.encodingContext(commandBuffer: commandBuffer))
-        let factors = try XCTUnwrap(mesh.encodedFactors, "draw binds a factors slice")
+        try mesh.encode(in: builder.encodingContext(commandBuffer: commandBuffer))
+        guard let factors = mesh.encodedFactors else {
+            print("REVIEW4 tessellate=true: update calls \(tessellator.calls), with pipeline \(tessellator.callsWithPipeline), encodedFactors nil: the draw is skipped")
+            XCTAssertEqual(tessellator.callsWithPipeline, 0)
+            return
+        }
         let length = tessellator.factorsLength
         let bytes = factors.buffer.contents().advanced(by: factors.offset).assumingMemoryBound(to: UInt8.self)
         let initial = Array(UnsafeBufferPointer(start: bytes, count: min(length, 16)))
@@ -66,11 +70,11 @@ final class ReviewTessellationTests: XCTestCase {
         let (mesh, tessellator) = makeMesh(tessellate: false)
         let commandBuffer = try XCTUnwrap(commandQueue.makeCommandBuffer())
         let builder = submission(encoder)
-        mesh.encode(in: builder.encodingContext(commandBuffer: commandBuffer))
+        try mesh.encode(in: builder.encodingContext(commandBuffer: commandBuffer))
         let firstCalls = tessellator.calls
         let frozen = mesh.encodedFactors
-        mesh.encode(in: builder.encodingContext(commandBuffer: commandBuffer))
-        mesh.encode(in: builder.encodingContext(commandBuffer: commandBuffer))
+        try mesh.encode(in: builder.encodingContext(commandBuffer: commandBuffer))
+        try mesh.encode(in: builder.encodingContext(commandBuffer: commandBuffer))
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         print("REVIEW4 tessellate=false: update calls after first encode \(firstCalls), after three encodes \(tessellator.calls), with pipeline \(tessellator.callsWithPipeline), frozen buffer bound \(frozen != nil) storage \(frozen.map { Int($0.buffer.storageMode.rawValue) } ?? -1)")

@@ -42,12 +42,63 @@ public class GenericParameter<T: Codable & Equatable>: Parameter {
     {
         didSet
         {
-            if oldValue != self.value
+            let value = self.value
+            if oldValue != value
             {
                 self.valueDidChange = true
-                valuePublisher.send(self.value)
+                notify(value)
             }
         }
+    }
+
+    /// Who hears this parameter change, in one stored struct so a change reads it once.
+    private struct Listeners {
+        /// Owners that mirror this parameter, such as Fabric's ParameterPort, observe it here:
+        /// synchronously, on every change, before `valuePublisher` sends, without Combine.
+        var valueObservers: ContiguousArray<ParameterValueObserver> = []
+
+        /// Groups packing this value, told directly so a change costs no Combine send per group.
+        var groupLinks: ContiguousArray<ParameterGroupLink> = []
+    }
+
+    private var listeners = Listeners()
+
+    /// Tells groups, owners and `valuePublisher` subscribers that the value changed. Setting `value`
+    /// calls it; call it yourself to notify with an unchanged value.
+    public func notifyValueChanged() {
+        notify(value)
+    }
+
+    /// A copy of the listeners, so a handler that stops observing doesn't change the loop under it.
+    private func notify(_ value: ValueType) {
+        let listeners = self.listeners
+        for link in listeners.groupLinks { link.group.memberValueDidChange() }
+        for observer in listeners.valueObservers { observer.handler() }
+        valuePublisher.send(value)
+    }
+
+    /// Calls `handler` on every value change until `owner` stops observing. One handler per owner:
+    /// observing again replaces it. Every other observer (UI, clients) uses `valuePublisher`.
+    public func observeValueChanges(by owner: AnyObject, _ handler: @escaping () -> Void) {
+        stopObservingValueChanges(by: owner)
+        listeners.valueObservers.append(ParameterValueObserver(owner: ObjectIdentifier(owner), handler: handler))
+    }
+
+    /// Safe from the owner's deinit.
+    public func stopObservingValueChanges(by owner: AnyObject) {
+        let identifier = ObjectIdentifier(owner)
+        listeners.valueObservers.removeAll { $0.owner == identifier }
+    }
+
+    func attach(to group: ParameterGroup) {
+        let identifier = ObjectIdentifier(group)
+        guard !listeners.groupLinks.contains(where: { $0.identifier == identifier }) else { return }
+        listeners.groupLinks.append(ParameterGroupLink(group: group, identifier: identifier))
+    }
+
+    /// By identifier, so a deinitializing group can detach without loading its unowned reference.
+    func detach(from groupIdentifier: ObjectIdentifier) {
+        listeners.groupLinks.removeAll { $0.identifier == groupIdentifier }
     }
 
     public var defaultValue: ValueType
@@ -151,7 +202,7 @@ public class GenericParameterWithMinMax<T: Codable & Equatable>: GenericParamete
     public var min: ValueType {
         didSet {
             minValuePublisher.send(min)
-            valuePublisher.send(value)
+            notifyValueChanged()
         }
     }
 
@@ -160,7 +211,7 @@ public class GenericParameterWithMinMax<T: Codable & Equatable>: GenericParamete
     public var max: ValueType {
         didSet {
             maxValuePublisher.send(max)
-            valuePublisher.send(value)
+            notifyValueChanged()
         }
     }
 
@@ -192,4 +243,17 @@ public class GenericParameterWithMinMax<T: Codable & Equatable>: GenericParamete
     override public func clone() -> any Parameter {
         GenericParameterWithMinMax<ValueType>(label, value, min, max, controlType, description)
     }
+}
+
+// Outside GenericParameter, so they are not generic: a type nested in a generic class needs a
+// metadata lookup on every access.
+
+private struct ParameterValueObserver {
+    let owner: ObjectIdentifier
+    let handler: () -> Void
+}
+
+private struct ParameterGroupLink {
+    unowned let group: ParameterGroup
+    let identifier: ObjectIdentifier
 }
